@@ -1,12 +1,17 @@
-#json editor
+# json editor
 
 ## Run Locally
 
-**Prerequisites:**  Node.js
-
+**Prerequisites:** Node.js
 
 1. Install dependencies:
    `npm install`
-
-3. Run the app:
+2. Run the app:
    `npm run dev`
+
+## Run With Docker
+
+1. Build and start:
+   `docker compose up --build`
+2. Open:
+   `http://localhost:3000`

@@ -66,7 +66,8 @@ async function startServer() {
     },
   });
 
-  const PORT = 3000;
+  const PORT = Number(process.env.PORT ?? 3000);
+  const HOST = process.env.HOST ?? "0.0.0.0";
   const workspaces = new Map<string, WorkspaceState>();
   const getWorkspaceState = (workspaceId: string): WorkspaceState => {
     let workspace = workspaces.get(workspaceId);
@@ -321,8 +322,8 @@ async function startServer() {
     });
   }
 
-  httpServer.listen(PORT, "127.0.0.1", () => {
-    console.log(`Server running on http://127.0.0.1:${PORT}`);
+  httpServer.listen(PORT, HOST, () => {
+    console.log(`Server running on http://${HOST}:${PORT}`);
   });
 }
 

@@ -1,0 +1,5 @@
+{
+  "name": "Remix: JSON to Tree Visualizer",
+  "description": "A tool to visualize JSON data as an interactive node-based tree graph.",
+  "requestFramePermissions": []
+}

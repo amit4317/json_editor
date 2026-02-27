@@ -41,6 +41,9 @@ const ThemeContext = createContext({ isDarkMode: true, toggleTheme: () => {} });
 const CollaborationContext = createContext<{ socket: Socket | null, isRemoteUpdate: React.MutableRefObject<boolean>, canEdit: boolean }>({ socket: null, isRemoteUpdate: { current: false }, canEdit: false });
 const WORKSPACE_PREFIX = '/workspace';
 const WORKSPACE_ID_PATTERN = /^[a-zA-Z0-9_-]{6,64}$/;
+const EDITOR_DEFAULT_WIDTH = 420;
+const EDITOR_MIN_WIDTH = 260;
+const GRAPH_MIN_WIDTH = 320;
 
 const createWorkspaceId = () => {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
@@ -644,7 +647,7 @@ const initialJson = {
   ]
 };
 
-function Flow({ jsonText, debouncedJsonText, setJsonText, isValid, setIsValid, isFullScreen, setIsFullScreen, onPermissionChange }: { jsonText: string, debouncedJsonText: string, setJsonText: (t: string) => void, isValid: boolean, setIsValid: (v: boolean) => void, isFullScreen: boolean, setIsFullScreen: (v: boolean) => void, onPermissionChange: (canEdit: boolean) => void }) {
+function Flow({ jsonText, debouncedJsonText, setJsonText, isValid, setIsValid, isFullScreen, setIsFullScreen, editorWidth, onEditorWidthSync, onPermissionChange }: { jsonText: string, debouncedJsonText: string, setJsonText: (t: string) => void, isValid: boolean, setIsValid: (v: boolean) => void, isFullScreen: boolean, setIsFullScreen: (v: boolean) => void, editorWidth: number, onEditorWidthSync: (width: number) => void, onPermissionChange: (canEdit: boolean) => void }) {
   const { isDarkMode, toggleTheme } = useContext(ThemeContext);
   const [nodes, setNodes, onNodesChange] = useNodesState([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState([]);
@@ -678,7 +681,9 @@ function Flow({ jsonText, debouncedJsonText, setJsonText, isValid, setIsValid, i
   const peerConnectionsRef = useRef<Record<string, RTCPeerConnection>>({});
   const remoteAudioElementsRef = useRef<Record<string, HTMLAudioElement>>({});
   const pendingIceCandidatesRef = useRef<Record<string, RTCIceCandidateInit[]>>({});
+  const pendingEditorWidthSyncRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isRemoteUpdateRef = useRef(false);
+  const hasReceivedInitStateRef = useRef(false);
   const userColor = useMemo(() => {
     const colors = ['#ef4444', '#3b82f6', '#10b981', '#f59e0b', '#8b5cf6', '#ec4899'];
     return colors[Math.floor(Math.random() * colors.length)];
@@ -925,6 +930,7 @@ function Flow({ jsonText, debouncedJsonText, setJsonText, isValid, setIsValid, i
     setWorkspaceOwnerUserId(null);
     setAllowCollaboratorEdits(false);
     setCanEdit(false);
+    hasReceivedInitStateRef.current = false;
     const socket = io({
       query: { workspaceId },
     });
@@ -955,10 +961,13 @@ function Flow({ jsonText, debouncedJsonText, setJsonText, isValid, setIsValid, i
       if (state.jsonText) setJsonText(state.jsonText);
       if (state.nodes) setNodes(state.nodes);
       if (state.edges) setEdges(state.edges);
+      if (typeof state.isFullScreen === 'boolean') setIsFullScreen(state.isFullScreen);
+      if (typeof state.editorWidth === 'number') onEditorWidthSync(state.editorWidth);
       if (Array.isArray(state.onlineUsers)) {
         setOnlineUsers(toUserRecord(state.onlineUsers));
       }
       applyWorkspacePermissions(state.permissions);
+      hasReceivedInitStateRef.current = true;
       setTimeout(() => { isRemoteUpdateRef.current = false; }, 100);
     });
 
@@ -1001,6 +1010,8 @@ function Flow({ jsonText, debouncedJsonText, setJsonText, isValid, setIsValid, i
       if (data.jsonText !== undefined) setJsonText(data.jsonText);
       if (data.nodes !== undefined) setNodes(data.nodes);
       if (data.edges !== undefined) setEdges(data.edges);
+      if (typeof data.isFullScreen === 'boolean') setIsFullScreen(data.isFullScreen);
+      if (typeof data.editorWidth === 'number') onEditorWidthSync(data.editorWidth);
       setTimeout(() => { isRemoteUpdateRef.current = false; }, 100);
     });
 
@@ -1097,8 +1108,32 @@ function Flow({ jsonText, debouncedJsonText, setJsonText, isValid, setIsValid, i
     return () => {
       stopVoiceChat(false);
       socket.disconnect();
+      hasReceivedInitStateRef.current = false;
     };
   }, [applyWorkspacePermissions, clearVoicePeers, createAndSendVoiceOffer, createVoicePeerConnection, removeVoicePeer, setEdges, setJsonText, setNodes, stopVoiceChat, userColor, workspaceId]);
+
+  useEffect(() => {
+    if (!hasReceivedInitStateRef.current) return;
+    if (isRemoteUpdateRef.current) return;
+    socketRef.current?.emit('state-change', { isFullScreen });
+  }, [isFullScreen]);
+
+  useEffect(() => {
+    if (!hasReceivedInitStateRef.current) return;
+    if (isRemoteUpdateRef.current) return;
+    if (pendingEditorWidthSyncRef.current) {
+      clearTimeout(pendingEditorWidthSyncRef.current);
+    }
+    pendingEditorWidthSyncRef.current = setTimeout(() => {
+      socketRef.current?.emit('state-change', { editorWidth });
+      pendingEditorWidthSyncRef.current = null;
+    }, 40);
+    return () => {
+      if (!pendingEditorWidthSyncRef.current) return;
+      clearTimeout(pendingEditorWidthSyncRef.current);
+      pendingEditorWidthSyncRef.current = null;
+    };
+  }, [editorWidth]);
 
   const onMouseMove = useCallback((evt: React.MouseEvent) => {
     if (!socketRef.current) return;
@@ -1689,6 +1724,9 @@ export default function App() {
   const [isFullScreen, setIsFullScreen] = useState(false);
   const [isDarkMode, setIsDarkMode] = useState(true);
   const [hasEditAccess, setHasEditAccess] = useState(false);
+  const [editorWidth, setEditorWidth] = useState(EDITOR_DEFAULT_WIDTH);
+  const editorResizeRef = useRef<{ startX: number; startWidth: number } | null>(null);
+  const editorWidthBeforeFullscreenRef = useRef(EDITOR_DEFAULT_WIDTH);
 
   useEffect(() => {
     const timer = setTimeout(() => setDebouncedJsonText(jsonText), 500);
@@ -1700,12 +1738,83 @@ export default function App() {
     setIsDarkMode(prev => !prev);
   }, []);
 
+  const clampEditorWidth = useCallback((width: number) => {
+    if (typeof window === 'undefined') {
+      return Math.max(EDITOR_MIN_WIDTH, width);
+    }
+    const maxWidth = Math.max(EDITOR_MIN_WIDTH, window.innerWidth - GRAPH_MIN_WIDTH);
+    return Math.min(Math.max(width, EDITOR_MIN_WIDTH), maxWidth);
+  }, []);
+
+  const applySyncedEditorWidth = useCallback((width: number) => {
+    const clampedWidth = clampEditorWidth(width);
+    editorWidthBeforeFullscreenRef.current = clampedWidth;
+    setEditorWidth(clampedWidth);
+  }, [clampEditorWidth]);
+
+  const handleResizeMove = useCallback((event: MouseEvent) => {
+    const resizeState = editorResizeRef.current;
+    if (!resizeState) return;
+    const nextWidth = resizeState.startWidth + (event.clientX - resizeState.startX);
+    setEditorWidth(clampEditorWidth(nextWidth));
+  }, [clampEditorWidth]);
+
+  const stopEditorResize = useCallback(() => {
+    if (!editorResizeRef.current) return;
+    editorResizeRef.current = null;
+    window.removeEventListener('mousemove', handleResizeMove);
+    window.removeEventListener('mouseup', stopEditorResize);
+    document.body.style.cursor = '';
+    document.body.style.userSelect = '';
+  }, [handleResizeMove]);
+
+  const startEditorResize = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    editorResizeRef.current = { startX: event.clientX, startWidth: editorWidth };
+    window.addEventListener('mousemove', handleResizeMove);
+    window.addEventListener('mouseup', stopEditorResize);
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+  }, [editorWidth, handleResizeMove, stopEditorResize]);
+
+  useEffect(() => {
+    const handleWindowResize = () => {
+      if (isFullScreen) return;
+      setEditorWidth((currentWidth) => clampEditorWidth(currentWidth));
+    };
+
+    handleWindowResize();
+    window.addEventListener('resize', handleWindowResize);
+
+    return () => {
+      window.removeEventListener('resize', handleWindowResize);
+      stopEditorResize();
+    };
+  }, [clampEditorWidth, isFullScreen, stopEditorResize]);
+
+  useEffect(() => {
+    if (isFullScreen) {
+      stopEditorResize();
+      return;
+    }
+
+    setEditorWidth(clampEditorWidth(editorWidthBeforeFullscreenRef.current));
+  }, [clampEditorWidth, isFullScreen, stopEditorResize]);
+
+  useEffect(() => {
+    if (isFullScreen) return;
+    editorWidthBeforeFullscreenRef.current = editorWidth;
+  }, [editorWidth, isFullScreen]);
+
   return (
     <ThemeContext.Provider value={{ isDarkMode, toggleTheme }}>
       <div className={`flex h-screen w-full overflow-hidden transition-colors duration-200 ${isDarkMode ? 'bg-[#0d1117] text-white' : 'bg-[#f8f9fa] text-[#111827]'}`}>
         {/* Left Panel - Editor */}
         {!isFullScreen && (
-          <div className={`w-1/3 min-w-[300px] flex flex-col border-r transition-colors duration-200 ${isDarkMode ? 'border-[#30363d] bg-[#1e1e1e]' : 'border-[#e5e7eb] bg-white'}`}>
+          <div
+            className={`relative shrink-0 flex flex-col border-r transition-colors duration-200 ${isDarkMode ? 'border-[#30363d] bg-[#1e1e1e]' : 'border-[#e5e7eb] bg-white'}`}
+            style={{ width: `${editorWidth}px` }}
+          >
             <div className="flex-1 overflow-hidden">
               <Editor
                 height="100%"
@@ -1764,13 +1873,20 @@ export default function App() {
                 <div className="ml-3 text-amber-500">Read Only</div>
               )}
             </div>
+            <div
+              role="separator"
+              aria-label="Resize JSON editor panel"
+              aria-orientation="vertical"
+              className={`absolute right-0 top-0 h-full w-1.5 translate-x-1/2 cursor-col-resize ${isDarkMode ? 'hover:bg-blue-500/40 active:bg-blue-500/60' : 'hover:bg-blue-400/40 active:bg-blue-400/60'}`}
+              onMouseDown={startEditorResize}
+            />
           </div>
         )}
 
         {/* Right Panel - Graph */}
         <div className={`flex-1 relative transition-colors duration-200 ${isDarkMode ? 'bg-[#0d1117]' : 'bg-[#f8f9fa]'}`}>
           <ReactFlowProvider>
-            <Flow jsonText={jsonText} debouncedJsonText={debouncedJsonText} setJsonText={setJsonText} isValid={isValid} setIsValid={setIsValid} isFullScreen={isFullScreen} setIsFullScreen={setIsFullScreen} onPermissionChange={setHasEditAccess} />
+            <Flow jsonText={jsonText} debouncedJsonText={debouncedJsonText} setJsonText={setJsonText} isValid={isValid} setIsValid={setIsValid} isFullScreen={isFullScreen} setIsFullScreen={setIsFullScreen} editorWidth={editorWidth} onEditorWidthSync={applySyncedEditorWidth} onPermissionChange={setHasEditAccess} />
           </ReactFlowProvider>
         </div>
       </div>

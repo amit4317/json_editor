@@ -10,6 +10,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const WORKSPACE_PREFIX = "/workspace";
 const WORKSPACE_ID_PATTERN = /^[a-zA-Z0-9_-]{6,64}$/;
+const DEFAULT_EDITOR_WIDTH = 420;
 
 const createWorkspaceId = () => randomUUID().replace(/-/g, "").slice(0, 12);
 const getWorkspaceQueryId = (queryValue) =>
@@ -24,6 +25,8 @@ const createWorkspaceState = () => ({
   jsonText: "",
   nodes: [],
   edges: [],
+  isFullScreen: false,
+  editorWidth: DEFAULT_EDITOR_WIDTH,
   connectedUsers: new Map(),
   ownerSocketId: null,
   allowCollaboratorEdits: false,
@@ -87,6 +90,8 @@ async function startServer() {
       jsonText: workspace.jsonText,
       nodes: workspace.nodes,
       edges: workspace.edges,
+      isFullScreen: workspace.isFullScreen,
+      editorWidth: workspace.editorWidth,
       onlineUsers: getOnlineUsers(workspace),
       permissions: getPermissionsPayload(workspace, socket.id),
     });
@@ -212,15 +217,34 @@ async function startServer() {
     socket.on("state-change", (data) => {
       const canEdit =
         socket.id === workspace.ownerSocketId || workspace.allowCollaboratorEdits;
-      if (!canEdit) return;
-
-      workspace.jsonText = data.jsonText ?? workspace.jsonText;
-      workspace.nodes = data.nodes ?? workspace.nodes;
-      workspace.edges = data.edges ?? workspace.edges;
+      const statePayload = {};
+      if (canEdit) {
+        if (typeof (data == null ? void 0 : data.jsonText) === "string") {
+          workspace.jsonText = data.jsonText;
+          statePayload.jsonText = workspace.jsonText;
+        }
+        if (Array.isArray(data == null ? void 0 : data.nodes)) {
+          workspace.nodes = data.nodes;
+          statePayload.nodes = workspace.nodes;
+        }
+        if (Array.isArray(data == null ? void 0 : data.edges)) {
+          workspace.edges = data.edges;
+          statePayload.edges = workspace.edges;
+        }
+      }
+      if (typeof (data == null ? void 0 : data.isFullScreen) === "boolean") {
+        workspace.isFullScreen = data.isFullScreen;
+        statePayload.isFullScreen = workspace.isFullScreen;
+      }
+      if (typeof (data == null ? void 0 : data.editorWidth) === "number" && Number.isFinite(data.editorWidth)) {
+        workspace.editorWidth = data.editorWidth;
+        statePayload.editorWidth = workspace.editorWidth;
+      }
+      if (Object.keys(statePayload).length === 0) return;
 
       socket.to(workspaceId).emit("state-update", {
         workspaceId,
-        ...data,
+        ...statePayload,
       });
     });
 

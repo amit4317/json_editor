@@ -30,6 +30,7 @@ import {
   Connection
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
+import Editor from '@monaco-editor/react';
 import dagre from 'dagre';
 import { toPng } from 'html-to-image';
 import { Check, X, Maximize, Minimize, Plus, Minus, Search, Menu, Focus, Sun, Moon, Download, Trash2, PlusSquare, Link2, MousePointer2, User, Mic, MicOff } from 'lucide-react';
@@ -108,6 +109,7 @@ type RowData = {
 type NodeData = {
   rows: RowData[];
   isSyntheticRoot?: boolean;
+  isPrimitiveArrayItemWrapper?: boolean;
 };
 
 type OnlineUser = {
@@ -470,13 +472,15 @@ function generateGraph(json: any, isDarkMode: boolean) {
     nodeId: string,
     edgeSource: string | null,
     edgeSourceHandle: string | null,
-    edgeLabel: string
+    edgeLabel: string,
+    isPrimitiveArrayItemWrapper: boolean = false
   ) {
     if (typeof value === 'object' && value !== null) {
       if (Array.isArray(value)) {
         value.forEach((item, index) => {
           const childNodeId = `${nodeId}-${index}`;
-          processValue(item, childNodeId, edgeSource, edgeSourceHandle, edgeLabel);
+          const isPrimitiveItem = item === null || typeof item !== 'object';
+          processValue(item, childNodeId, edgeSource, edgeSourceHandle, edgeLabel, isPrimitiveItem);
         });
       } else {
         const rows: RowData[] = [];
@@ -524,7 +528,11 @@ function generateGraph(json: any, isDarkMode: boolean) {
         nodes.push({
           id: nodeId,
           type: 'jsonNode',
-          data: { rows, isSyntheticRoot: nodeId === 'root' && hasSyntheticRoot },
+          data: {
+            rows,
+            isSyntheticRoot: nodeId === 'root' && hasSyntheticRoot,
+            isPrimitiveArrayItemWrapper
+          },
           position: { x: 0, y: 0 },
         });
 
@@ -553,11 +561,18 @@ function generateGraph(json: any, isDarkMode: boolean) {
         });
       }
     } else {
+      let primitiveType: RowData['primitiveType'] = 'string';
+      if (value === null) primitiveType = 'null';
+      else if (typeof value === 'number') primitiveType = 'number';
+      else if (typeof value === 'boolean') primitiveType = 'boolean';
       // Primitive root
       nodes.push({
         id: nodeId,
         type: 'jsonNode',
-        data: { rows: [{ id: 'root', key: 'value', value: String(value), type: 'primitive', primitiveType: typeof value as any }] },
+        data: {
+          rows: [{ id: 'root', key: 'value', value: value === null ? 'null' : String(value), type: 'primitive', primitiveType }],
+          isPrimitiveArrayItemWrapper
+        },
         position: { x: 0, y: 0 },
       });
       if (edgeSource && edgeSourceHandle) {
@@ -1147,7 +1162,8 @@ function Flow({ jsonText, debouncedJsonText, setJsonText, isValid, setIsValid, i
     });
   }, [canEdit, setNodes]);
 
-  // Sync back to JSON
+  // Sync back to JSON when graph state changes.
+  // Do not run this effect on raw editor keystrokes, otherwise in-progress typing can be overwritten.
   useEffect(() => {
     if (!canEdit || nodes.length === 0 || isRemoteUpdateRef.current) return;
     
@@ -1170,6 +1186,19 @@ function Flow({ jsonText, debouncedJsonText, setJsonText, isValid, setIsValid, i
 
         const nodeEdges = edgeMap.get(nodeId) || [];
         const rows = (node.data as NodeData).rows;
+        const nodeData = node.data as NodeData;
+
+        // Unwrap synthetic wrapper nodes used internally for primitive array items.
+        // This keeps arrays like ["a", "b"] from becoming [{ value: "a" }, { value: "b" }].
+        if (nodeData.isPrimitiveArrayItemWrapper && rows.length > 0) {
+          const row = rows[0];
+          let val: any = row.value;
+          if (row.primitiveType === 'number') val = Number(val);
+          else if (row.primitiveType === 'boolean') val = val === 'true';
+          else if (row.primitiveType === 'null') val = null;
+          visited.delete(nodeId);
+          return val;
+        }
         
         // A node should serialize as an array only when its own row keys are numeric indexes.
         const isArray = rows.length > 0 && rows.every((r) => /^\d+$/.test(String(r.key).trim()));
@@ -1259,6 +1288,17 @@ function Flow({ jsonText, debouncedJsonText, setJsonText, isValid, setIsValid, i
 
     const newJson = buildJson();
     const newText = JSON.stringify(newJson, null, 2);
+    const isFormattingOnlyDifference = (() => {
+      try {
+        const parsedCurrent = JSON.parse(jsonText);
+        return JSON.stringify(parsedCurrent) === JSON.stringify(newJson);
+      } catch {
+        return false;
+      }
+    })();
+    if (isFormattingOnlyDifference) {
+      return;
+    }
     if (newText !== jsonText && newText !== lastSyncedJsonRef.current) {
       lastSyncedJsonRef.current = newText;
       setJsonText(newText);
@@ -1266,7 +1306,7 @@ function Flow({ jsonText, debouncedJsonText, setJsonText, isValid, setIsValid, i
         socketRef.current?.emit('state-change', { jsonText: newText });
       }
     }
-  }, [canEdit, nodes, edges, jsonText, setJsonText]);
+  }, [canEdit, nodes, edges, setJsonText]);
 
   useEffect(() => {
     if (debouncedJsonText === lastSyncedJsonRef.current) return;
@@ -1337,14 +1377,21 @@ function Flow({ jsonText, debouncedJsonText, setJsonText, isValid, setIsValid, i
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
+      const target = e.target as HTMLElement;
+      const isMonacoFocused = !!target.closest('.monaco-editor');
+
+      if ((e.ctrlKey || e.metaKey) && e.key === 'f' && !isMonacoFocused) {
         e.preventDefault();
         searchInputRef.current?.focus();
       }
       if (e.key === 'Delete' || e.key === 'Backspace') {
-        // Only delete if not typing in an input or textarea
-        const target = e.target as HTMLElement;
-        if (target.tagName !== 'INPUT' && target.tagName !== 'TEXTAREA') {
+        // Only delete selected graph elements when focus is outside editable controls.
+        const isEditableTarget =
+          target.tagName === 'INPUT' ||
+          target.tagName === 'TEXTAREA' ||
+          target.isContentEditable ||
+          isMonacoFocused;
+        if (!isEditableTarget) {
           deleteSelected();
         }
       }
@@ -1642,7 +1689,6 @@ export default function App() {
   const [isFullScreen, setIsFullScreen] = useState(false);
   const [isDarkMode, setIsDarkMode] = useState(true);
   const [hasEditAccess, setHasEditAccess] = useState(false);
-  const lineNumbersRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     const timer = setTimeout(() => setDebouncedJsonText(jsonText), 500);
@@ -1654,43 +1700,47 @@ export default function App() {
     setIsDarkMode(prev => !prev);
   }, []);
 
-  const handleScroll = (e: React.UIEvent<HTMLTextAreaElement>) => {
-    if (lineNumbersRef.current) {
-      lineNumbersRef.current.style.transform = `translateY(-${e.currentTarget.scrollTop}px)`;
-    }
-  };
-
-  const lineCount = Math.max(jsonText.split('\n').length, 1);
-
   return (
     <ThemeContext.Provider value={{ isDarkMode, toggleTheme }}>
       <div className={`flex h-screen w-full overflow-hidden transition-colors duration-200 ${isDarkMode ? 'bg-[#0d1117] text-white' : 'bg-[#f8f9fa] text-[#111827]'}`}>
         {/* Left Panel - Editor */}
         {!isFullScreen && (
           <div className={`w-1/3 min-w-[300px] flex flex-col border-r transition-colors duration-200 ${isDarkMode ? 'border-[#30363d] bg-[#1e1e1e]' : 'border-[#e5e7eb] bg-white'}`}>
-            <div className="flex-1 relative flex overflow-hidden">
-              {/* Line Numbers */}
-              <div 
-                className={`absolute left-0 top-0 bottom-0 w-12 border-r flex flex-col items-end py-4 pr-3 font-mono text-sm select-none pointer-events-none leading-6 overflow-hidden z-10 transition-colors duration-200 ${isDarkMode ? 'bg-[#1e1e1e] border-[#333] text-[#858585]' : 'bg-[#f9fafb] border-[#e5e7eb] text-[#9ca3af]'}`}
-              >
-                <div ref={lineNumbersRef}>
-                  {Array.from({ length: lineCount }).map((_, i) => (
-                    <div key={i + 1}>{i + 1}</div>
-                  ))}
-                </div>
-              </div>
-              
-              {/* Textarea */}
-              <textarea
-                className={`w-full h-full p-4 pl-16 bg-transparent font-mono text-sm outline-none resize-none whitespace-pre leading-6 transition-colors duration-200 ${isDarkMode ? 'text-[#d4d4d4]' : 'text-[#374151]'}`}
+            <div className="flex-1 overflow-hidden">
+              <Editor
+                height="100%"
+                language="json"
                 value={jsonText}
-                onChange={(e) => {
+                onChange={(value) => {
                   if (!hasEditAccess) return;
-                  setJsonText(e.target.value);
+                  setJsonText(value ?? '');
                 }}
-                onScroll={handleScroll}
-                spellCheck={false}
-                readOnly={!hasEditAccess}
+                theme={isDarkMode ? 'vs-dark' : 'light'}
+                options={{
+                  readOnly: !hasEditAccess,
+                  minimap: { enabled: false },
+                  automaticLayout: true,
+                  fontSize: 13,
+                  tabSize: 2,
+                  formatOnPaste: false,
+                  formatOnType: false,
+                  scrollBeyondLastLine: false,
+                  wordWrap: 'on',
+                  autoIndent: 'none',
+                  autoClosingBrackets: 'never',
+                  autoClosingQuotes: 'never',
+                  autoClosingDelete: 'never',
+                  autoClosingOvertype: 'never',
+                  autoSurround: 'never',
+                  quickSuggestions: false,
+                  suggestOnTriggerCharacters: false,
+                  acceptSuggestionOnEnter: 'off',
+                  tabCompletion: 'off',
+                  snippetSuggestions: 'none',
+                  wordBasedSuggestions: 'off',
+                  parameterHints: { enabled: false },
+                  inlineSuggest: { enabled: false },
+                }}
               />
             </div>
             

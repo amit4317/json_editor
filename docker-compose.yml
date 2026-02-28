@@ -6,9 +6,12 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        APP_BASE_PATH: /json/
     environment:
       NODE_ENV: production
       HOST: 0.0.0.0
       PORT: 3000
+      APP_BASE_PATH: /json/
     ports:
       - "3000:3000"

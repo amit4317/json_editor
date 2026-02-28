@@ -10,9 +10,24 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const WORKSPACE_PREFIX = "/workspace";
 const WORKSPACE_ID_PATTERN = /^[a-zA-Z0-9_-]{6,64}$/;
+const DEFAULT_APP_BASE_PATH = "/json/";
 const DEFAULT_EDITOR_WIDTH = 420;
 
 const createWorkspaceId = () => randomUUID().replace(/-/g, "").slice(0, 12);
+const normalizeBasePath = (candidate) => {
+  if (!candidate) return DEFAULT_APP_BASE_PATH;
+  const trimmed = candidate.trim();
+  if (!trimmed || trimmed === "/") return "/";
+  const withLeadingSlash = trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
+  const withTrailingSlash = withLeadingSlash.endsWith("/") ? withLeadingSlash : `${withLeadingSlash}/`;
+  return withTrailingSlash.replace(/\/{2,}/g, "/");
+};
+const joinBasePath = (basePath, pathname) => {
+  const normalizedPathname = pathname.startsWith("/") ? pathname : `/${pathname}`;
+  if (basePath === "/") return normalizedPathname;
+  return `${basePath.slice(0, -1)}${normalizedPathname}`;
+};
+const getBaseRoute = (basePath) => (basePath === "/" ? "/" : basePath.slice(0, -1));
 const getWorkspaceQueryId = (queryValue) =>
   Array.isArray(queryValue) ? queryValue[0] : queryValue;
 const sanitizeWorkspaceId = (candidate) => {
@@ -21,6 +36,9 @@ const sanitizeWorkspaceId = (candidate) => {
   if (!WORKSPACE_ID_PATTERN.test(trimmed)) return createWorkspaceId();
   return trimmed;
 };
+const APP_BASE_PATH = normalizeBasePath(process.env.APP_BASE_PATH);
+const APP_BASE_ROUTE = getBaseRoute(APP_BASE_PATH);
+const SOCKET_IO_PATH = joinBasePath(APP_BASE_PATH, "/socket.io");
 const createWorkspaceState = () => ({
   jsonText: "",
   nodes: [],
@@ -36,6 +54,7 @@ async function startServer() {
   const app = express();
   const httpServer = createServer(app);
   const io = new Server(httpServer, {
+    path: SOCKET_IO_PATH,
     cors: {
       origin: "*",
       methods: ["GET", "POST"],
@@ -60,9 +79,19 @@ async function startServer() {
     canEdit:
       socketId === workspace.ownerSocketId || workspace.allowCollaboratorEdits,
   });
+  const workspaceRootPath = joinBasePath(APP_BASE_PATH, WORKSPACE_PREFIX);
+  const redirectRoutes = Array.from(
+    new Set([
+      "/",
+      APP_BASE_ROUTE,
+      APP_BASE_PATH,
+      workspaceRootPath,
+      `${workspaceRootPath}/`,
+    ]),
+  );
 
-  app.get(["/", WORKSPACE_PREFIX, `${WORKSPACE_PREFIX}/`], (_req, res) => {
-    res.redirect(`${WORKSPACE_PREFIX}/${createWorkspaceId()}`);
+  app.get(redirectRoutes, (_req, res) => {
+    res.redirect(`${workspaceRootPath}/${createWorkspaceId()}`);
   });
 
   io.on("connection", (socket) => {
@@ -281,10 +310,18 @@ async function startServer() {
     });
     app.use(vite.middlewares);
   } else {
-    app.use(express.static(path.join(__dirname, "dist")));
-    app.get("*", (_req, res) => {
-      res.sendFile(path.join(__dirname, "dist", "index.html"));
-    });
+    const distPath = path.join(__dirname, "dist");
+    if (APP_BASE_PATH === "/") {
+      app.use(express.static(distPath));
+      app.get("*", (_req, res) => {
+        res.sendFile(path.join(distPath, "index.html"));
+      });
+    } else {
+      app.use(APP_BASE_PATH, express.static(distPath));
+      app.get(`${APP_BASE_ROUTE}/*`, (_req, res) => {
+        res.sendFile(path.join(distPath, "index.html"));
+      });
+    }
   }
 
   httpServer.listen(PORT, HOST, () => {

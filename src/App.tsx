@@ -41,9 +41,28 @@ const ThemeContext = createContext({ isDarkMode: true, toggleTheme: () => {} });
 const CollaborationContext = createContext<{ socket: Socket | null, isRemoteUpdate: React.MutableRefObject<boolean>, canEdit: boolean }>({ socket: null, isRemoteUpdate: { current: false }, canEdit: false });
 const WORKSPACE_PREFIX = '/workspace';
 const WORKSPACE_ID_PATTERN = /^[a-zA-Z0-9_-]{6,64}$/;
+const DEFAULT_APP_BASE_PATH = '/json/';
 const EDITOR_DEFAULT_WIDTH = 420;
 const EDITOR_MIN_WIDTH = 260;
 const GRAPH_MIN_WIDTH = 320;
+
+const normalizeBasePath = (value: string) => {
+  const trimmed = value.trim();
+  if (!trimmed || trimmed === '/') return '/';
+  const withLeadingSlash = trimmed.startsWith('/') ? trimmed : `/${trimmed}`;
+  const withTrailingSlash = withLeadingSlash.endsWith('/') ? withLeadingSlash : `${withLeadingSlash}/`;
+  return withTrailingSlash.replace(/\/{2,}/g, '/');
+};
+
+const getPathSegments = (pathname: string) => pathname.split('/').filter(Boolean);
+const APP_BASE_PATH = normalizeBasePath(import.meta.env.BASE_URL || DEFAULT_APP_BASE_PATH);
+const APP_BASE_SEGMENTS = getPathSegments(APP_BASE_PATH);
+
+const joinAppPath = (pathname: string) => {
+  const normalizedPathname = pathname.startsWith('/') ? pathname : `/${pathname}`;
+  if (APP_BASE_PATH === '/') return normalizedPathname;
+  return `${APP_BASE_PATH.slice(0, -1)}${normalizedPathname}`;
+};
 
 const createWorkspaceId = () => {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
@@ -53,9 +72,14 @@ const createWorkspaceId = () => {
 };
 
 const getWorkspaceIdFromPath = (pathname: string): string | null => {
-  const parts = pathname.split('/').filter(Boolean);
-  if (parts[0] !== WORKSPACE_PREFIX.slice(1)) return null;
-  const workspaceId = parts[1];
+  const parts = getPathSegments(pathname);
+  if (APP_BASE_SEGMENTS.length > 0) {
+    const baseSegments = parts.slice(0, APP_BASE_SEGMENTS.length);
+    if (baseSegments.join('/') !== APP_BASE_SEGMENTS.join('/')) return null;
+  }
+  const relativeParts = parts.slice(APP_BASE_SEGMENTS.length);
+  if (relativeParts[0] !== WORKSPACE_PREFIX.slice(1)) return null;
+  const workspaceId = relativeParts[1];
   if (!workspaceId || !WORKSPACE_ID_PATTERN.test(workspaceId)) return null;
   return workspaceId;
 };
@@ -916,7 +940,7 @@ function Flow({ jsonText, debouncedJsonText, setJsonText, isValid, setIsValid, i
     if (workspaceId) return;
     if (typeof window === 'undefined') return;
     const nextWorkspaceId = createWorkspaceId();
-    window.location.replace(`${WORKSPACE_PREFIX}/${nextWorkspaceId}`);
+    window.location.replace(joinAppPath(`${WORKSPACE_PREFIX}/${nextWorkspaceId}`));
   }, [workspaceId]);
 
   useEffect(() => {
@@ -932,6 +956,7 @@ function Flow({ jsonText, debouncedJsonText, setJsonText, isValid, setIsValid, i
     setCanEdit(false);
     hasReceivedInitStateRef.current = false;
     const socket = io({
+      path: joinAppPath('/socket.io'),
       query: { workspaceId },
     });
     socketRef.current = socket;
